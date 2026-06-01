@@ -1,0 +1,3 @@
+Latitude (위도): 37.19528888888888
+Longitude (경도): 126.98601388888889
+Detected Animal (판별 종류): 여우

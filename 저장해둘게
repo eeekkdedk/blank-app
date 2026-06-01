@@ -1,0 +1,150 @@
+import streamlit as st
+from keras.models import load_model
+from PIL import Image, ImageOps
+from PIL.ExifTags import TAGS, GPSTAGS
+import numpy as np
+import math
+import pandas as pd
+import os
+
+# 1. 업로드된 새로운 동물 판별 모델과 라벨을 안전하게 캐싱
+@st.cache_resource
+def load_keras_model():
+    # 현재 폴더 및 model/ 폴더를 모두 검사하도록 경로를 유연하게 설정합니다.
+    if os.path.exists("keras_model (1).h5"):
+        return load_model("keras_model (1).h5", compile=False)
+    elif os.path.exists("model/keras_model (1).h5"):
+        return load_model("model/keras_model (1).h5", compile=False)
+    else:
+        # 파일이 완전히 밖에 있을 때를 대비한 상위 폴더 탐색 경로 추가
+        return load_model("../keras_model (1).h5", compile=False)
+
+@st.cache_resource
+def load_labels():
+    if os.path.exists("labels (1).txt"):
+        path = "labels (1).txt"
+    elif os.path.exists("model/labels (1).txt"):
+        path = "model/labels (1).txt"
+    else:
+        path = "../labels (1).txt"
+    return open(path, "r", encoding='UTF-8').readlines()
+
+# 📍 이미지에서 GPS 위치 정보를 추출하는 함수
+def get_gps_info(image):
+    try:
+        exif = image._getexif()
+        if not exif:
+            return None
+        
+        gps_info = {}
+        for tag, value in exif.items():
+            decoded = TAGS.get(tag, tag)
+            if decoded == 'GPSInfo':
+                for t in value:
+                    sub_decoded = GPSTAGS.get(t, t)
+                    gps_info[sub_decoded] = value[t]
+        
+        if 'GPSLatitude' in gps_info and 'GPSLongitude' in gps_info:
+            lat_ref = gps_info.get('GPSLatitudeRef', 'N')
+            lng_ref = gps_info.get('GPSLongitudeRef', 'E')
+            
+            lat = gps_info['GPSLatitude']
+            lng = gps_info['GPSLongitude']
+            
+            lat_deg = float(lat[0]) + float(lat[1])/60.0 + float(lat[2])/3600.0
+            lng_deg = float(lng[0]) + float(lng[1])/60.0 + float(lng[2])/3600.0
+            
+            if lat_ref == 'S': lat_deg = -lat_deg
+            if lng_ref == 'W': lng_deg = -lng_deg
+            
+            return lat_deg, lng_deg
+    except Exception:
+        return None
+    return None
+
+
+# 📸 디렉토리에 파일과 위치 데이터를 함께 저장하는 함수
+def save_uploaded_file_with_gps(directory, file, gps_data):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        
+    # 원본 이미지 파일 저장
+    file_path = os.path.join(directory, file.name)
+    with open(file_path, 'wb') as f:
+        f.write(file.getbuffer())
+        
+    # 위치 데이터가 있다면 텍스트 파일로 함께 저장
+    base_name, _ = os.path.splitext(file.name)
+    txt_path = os.path.join(directory, f"{base_name}_location.txt")
+    
+    if gps_data:
+        lat, lng = gps_data
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(f"Latitude (위도): {lat}\nLongitude (경도): {lng}\n")
+        st.success(f'Saved file & GPS metadata in {directory}')
+    else:
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write("No GPS data found in this image.\n")
+        st.warning(f'Saved file in {directory} (위치 데이터 없음)')
+
+
+# 🔮 새로운 동물 판별 모델의 예측을 수행하는 함수
+def predict_animal(image, model, class_names):
+    size = (224, 224)
+    image = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
+    image_array = np.asarray(image)
+    
+    normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
+    data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+    data[0] = normalized_image_array
+
+    prediction = model.predict(data)
+    index = np.argmax(prediction)
+    class_name = class_names[index]
+    confidence_score = prediction[0][index]
+
+    return class_name[2:].strip(), confidence_score, prediction[0]
+
+
+def main():
+    # 📝 동물 판별기에 맞춘 타이틀 및 설명 수정
+    st.title('에일리언GO🐾')
+    st.info('이미지를 업로드하면 어떤 동물인지 분석합니다.')
+    
+    image = st.file_uploader('동물 사진을 보여주세요!', type=['jpg','png','jpeg','webp'])
+
+    if image is not None:
+        # AI 분석 및 GPS 추출을 위해 PIL 이미지로 열기
+        input_image = Image.open(image)
+        
+        # 📍 1. 위치 데이터 추출 및 사이드바 지도 표시
+        gps_data = get_gps_info(input_image)
+        
+        if gps_data:
+            st.sidebar.marker_data = pd.DataFrame({'lat': [gps_data[0]], 'lon': [gps_data[1]]})
+            st.sidebar.write(f"📍 촬영 위치 발견! (위도: {round(gps_data[0], 4)}, 경도: {round(gps_data[1], 4)})")
+            st.sidebar.map(st.sidebar.marker_data)
+        
+        # 📍 2. 사진과 위치 데이터(.txt) 함께 저장하기
+        save_uploaded_file_with_gps("uploaded_images", image, gps_data)
+
+        st.image(input_image, caption='업로드된 이미지', use_container_width=True)
+
+        # 📍 3. 새로운 모델 및 라벨 로드 후 동물 판별 작동
+        model = load_keras_model()
+        class_names = load_labels()
+        animal_name, confidence, all_predictions = predict_animal(input_image, model, class_names)
+
+        # 분석 결과 화면에 크게 표시
+        st.success(f'분석 결과: 해당 동물은 현재 {math.floor(confidence*100*10)/10}% 확률로 **[{animal_name}]** 입니다.')
+
+        # 📍 4. 확률 분포 막대그래프 시각화 (새 라벨 클래스 연동)
+        st.subheader('📊 동물별 확률 분포')
+        emotion_df = pd.DataFrame({
+            'animal': [name[2:].strip() for name in class_names], 
+            'probability': all_predictions
+        })
+        st.bar_chart(emotion_df.set_index('animal'))
+
+if __name__=='__main__':
+    main()
